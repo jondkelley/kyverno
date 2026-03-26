@@ -33,12 +33,21 @@ import (
 // in the controller main functions
 var LibraryContext Context
 
+// LibraryContextFactory is a global factory for creating per-request context instances.
+// This is used by the background controller to create isolated contexts for each UR processing.
+var LibraryContextFactory ContextFactory
+
 func GetLibsCtx() Context {
 	if LibraryContext == nil {
 		klog.V(2).Info("global library context was nil, setting to a fake context. If a real context is needed ensure that the variable is set")
 		LibraryContext = NewFakeContextProvider()
 	}
 	return LibraryContext
+}
+
+// GetLibsCtxFactory returns the global context factory for creating per-request contexts.
+func GetLibsCtxFactory() ContextFactory {
+	return LibraryContextFactory
 }
 
 type Context interface {
@@ -50,6 +59,14 @@ type Context interface {
 	GetGeneratedResources() []*unstructured.Unstructured
 	ClearGeneratedResources()
 	SetGenerateContext(polName, triggerName, triggerNamespace, triggerAPIVersion, triggerGroup, triggerKind, triggerUID string, restoreCache bool)
+}
+
+// ContextFactory creates per-request Context instances with isolated generate state.
+// This prevents race conditions when multiple background workers process URs concurrently.
+type ContextFactory interface {
+	// NewContext creates a new Context instance with isolated generate state.
+	// Expensive resources (client, imagedata, gctxStore) are shared across instances.
+	NewContext() Context
 }
 
 type generateContext struct {
@@ -73,6 +90,28 @@ type contextProvider struct {
 	restMapper         meta.RESTMapper
 }
 
+// contextProviderFactory creates per-request contextProvider instances that share
+// expensive resources but have isolated generate state (genCtx, generatedResources).
+type contextProviderFactory struct {
+	client        dclient.Interface
+	imagedata     imagedataloader.Fetcher
+	gctxStore     gctxstore.Store
+	restMapper    meta.RESTMapper
+	cliEvaluation bool
+}
+
+// NewContext creates a new Context instance with isolated generate state.
+func (f *contextProviderFactory) NewContext() Context {
+	return &contextProvider{
+		client:             f.client,
+		imagedata:          f.imagedata,
+		gctxStore:          f.gctxStore,
+		restMapper:         f.restMapper,
+		cliEvaluation:      f.cliEvaluation,
+		generatedResources: make([]*unstructured.Unstructured, 0),
+	}
+}
+
 func NewContextProvider(
 	client dclient.Interface,
 	imageOpts []imagedataloader.Option,
@@ -93,6 +132,16 @@ func NewContextProvider(
 		generatedResources: make([]*unstructured.Unstructured, 0),
 	}
 	LibraryContext = ctx
+
+	// Also initialize the factory for creating per-request contexts
+	LibraryContextFactory = &contextProviderFactory{
+		client:        client,
+		imagedata:     idl,
+		gctxStore:     gctxStore,
+		restMapper:    restMapper,
+		cliEvaluation: cliEvaluation,
+	}
+
 	return ctx, nil
 }
 

@@ -1,0 +1,32 @@
+apiVersion: policies.kyverno.io/v1
+kind: GeneratingPolicy
+metadata:
+  name: test-sync-generate
+spec:
+  evaluation:
+    generateExisting:
+      enabled: true
+    synchronize:
+      enabled: true
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["apps"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["deployments"]
+  matchConditions:
+  - name: matches-namespace
+    expression: "object.metadata.namespace == 'test-gpol-sync'"
+  variables:
+  - name: cmName
+    expression: object.metadata.name + '-config'
+  generate:
+  - expression: |
+      generator.Apply(object.metadata.namespace, [
+        {
+          "apiVersion": dyn("v1"),
+          "kind": dyn("ConfigMap"),
+          "metadata": dyn({ "name": variables.cmName }),
+          "data": dyn({ "deployment": object.metadata.name })
+        }
+      ])

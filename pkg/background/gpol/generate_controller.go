@@ -35,10 +35,11 @@ type CELGenerateController struct {
 	// mapper
 	restMapper meta.RESTMapper
 
-	context      libs.Context
-	engine       gpolengine.Engine
-	provider     gpolengine.Provider
-	watchManager *WatchManager
+	// contextFactory creates per-request contexts with isolated generate state to prevent race conditions
+	contextFactory libs.ContextFactory
+	engine         gpolengine.Engine
+	provider       gpolengine.Provider
+	watchManager   *WatchManager
 
 	statusControl common.StatusControlInterface
 
@@ -53,7 +54,7 @@ type CELGenerateController struct {
 func NewCELGenerateController(
 	client dclient.Interface,
 	kyvernoClient versioned.Interface,
-	context libs.Context,
+	contextFactory libs.ContextFactory,
 	engine gpolengine.Engine,
 	provider gpolengine.Provider,
 	watchManager *WatchManager,
@@ -64,16 +65,16 @@ func NewCELGenerateController(
 	apiGroupResources, _ := restmapper.GetAPIGroupResources(client.GetKubeClient().Discovery())
 	restMapper := restmapper.NewDiscoveryRESTMapper(apiGroupResources)
 	return &CELGenerateController{
-		client:        client,
-		kyvernoClient: kyvernoClient,
-		restMapper:    restMapper,
-		context:       context,
-		engine:        engine,
-		provider:      provider,
-		watchManager:  watchManager,
-		statusControl: statusControl,
-		eventGen:      eventGen,
-		log:           log,
+		client:         client,
+		kyvernoClient:  kyvernoClient,
+		restMapper:     restMapper,
+		contextFactory: contextFactory,
+		engine:         engine,
+		provider:       provider,
+		watchManager:   watchManager,
+		statusControl:  statusControl,
+		eventGen:       eventGen,
+		log:            log,
 	}
 }
 
@@ -81,6 +82,11 @@ func (c *CELGenerateController) ProcessUR(ur *kyvernov2.UpdateRequest) error {
 	logger := c.log.WithValues("name", ur.GetName(), "policy", ur.Spec.GetPolicyKey())
 	generatedResources := make([]kyvernov1.ResourceSpec, 0)
 	logger.V(2).Info("start processing UR", "ur", ur.Name, "resourceVersion", ur.GetResourceVersion())
+
+	// Create a fresh context for this UR processing to prevent race conditions
+	// when multiple workers process URs concurrently. Each context has isolated
+	// generate state (genCtx, generatedResources) while sharing expensive resources.
+	ctx := c.contextFactory.NewContext()
 
 	var failures []error
 	for i := 0; i < len(ur.Spec.RuleContext); i++ {
@@ -108,7 +114,7 @@ func (c *CELGenerateController) ProcessUR(ur *kyvernov2.UpdateRequest) error {
 
 			gvr := mapping.Resource
 			request = celengine.Request(
-				c.context,
+				ctx,
 				trigger.GroupVersionKind(),
 				gvr,
 				"",
@@ -122,7 +128,7 @@ func (c *CELGenerateController) ProcessUR(ur *kyvernov2.UpdateRequest) error {
 				nil,
 			)
 		} else {
-			request = celengine.RequestFromAdmission(c.context, *admissionRequest)
+			request = celengine.RequestFromAdmission(ctx, *admissionRequest)
 		}
 		policy, err := c.provider.Get(context.TODO(), ur.Spec.GetPolicyKey())
 		if err != nil {
@@ -161,13 +167,11 @@ func (c *CELGenerateController) ProcessUR(ur *kyvernov2.UpdateRequest) error {
 					})
 				}
 				if isSync {
-					go func() {
-						if err := c.watchManager.SyncWatchers(ur.Spec.GetPolicyKey(), res.Result.GeneratedResources()); err != nil {
-							logger.Error(err, "failed to sync watchers for generated resources", "gpol", ur.Spec.GetPolicyKey())
-						} else {
-							logger.V(4).Info("synced watchers for generated resources", "gpol", ur.Spec.GetPolicyKey())
-						}
-					}()
+					if err := c.watchManager.SyncWatchers(ur.Spec.GetPolicyKey(), res.Result.GeneratedResources()); err != nil {
+						logger.Error(err, "failed to sync watchers for generated resources", "gpol", ur.Spec.GetPolicyKey())
+					} else {
+						logger.V(4).Info("synced watchers for generated resources", "gpol", ur.Spec.GetPolicyKey())
+					}
 				}
 			}
 			if err := c.audit(context.TODO(), engineResponse, generatedResources); err != nil {

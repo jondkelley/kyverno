@@ -64,10 +64,11 @@ type controller struct {
 	// queue
 	queue workqueue.TypedRateLimitingInterface[any]
 
-	context      libs.Context
-	gpolEngine   gpolengine.Engine
-	gpolProvider gpolengine.Provider
-	watchManager *gpol.WatchManager
+	context        libs.Context
+	contextFactory libs.ContextFactory
+	gpolEngine     gpolengine.Engine
+	gpolProvider   gpolengine.Provider
+	watchManager   *gpol.WatchManager
 
 	mpolEngine    mpolengine.Engine
 	restMapper    meta.RESTMapper
@@ -86,6 +87,7 @@ func NewController(
 	urInformer kyvernov2informers.UpdateRequestInformer,
 	namespaceInformer corev1informers.NamespaceInformer,
 	context libs.Context,
+	contextFactory libs.ContextFactory,
 	gpolEngine gpolengine.Engine,
 	gpolProvider gpolengine.Provider,
 	watchManager *gpol.WatchManager,
@@ -109,15 +111,16 @@ func NewController(
 			workqueue.DefaultTypedControllerRateLimiter[any](),
 			workqueue.TypedRateLimitingQueueConfig[any]{Name: "background"},
 		),
-		context:       context,
-		gpolEngine:    gpolEngine,
-		gpolProvider:  gpolProvider,
-		watchManager:  watchManager,
-		mpolEngine:    mpolEngine,
-		restMapper:    restMapper,
-		eventGen:      eventGen,
-		configuration: configuration,
-		jp:            jp,
+		context:        context,
+		contextFactory: contextFactory,
+		gpolEngine:     gpolEngine,
+		gpolProvider:   gpolProvider,
+		watchManager:   watchManager,
+		mpolEngine:     mpolEngine,
+		restMapper:     restMapper,
+		eventGen:       eventGen,
+		configuration:  configuration,
+		jp:             jp,
 	}
 	_, _ = urInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.addUR,
@@ -256,7 +259,7 @@ func (c *controller) processUR(ur *kyvernov2.UpdateRequest) error {
 		ctrl := generate.NewGenerateController(c.client, c.kyvernoClient, statusControl, c.engine, c.cpolLister, c.polLister, c.urLister, c.nsLister, c.configuration, c.eventGen, logger, c.jp)
 		return ctrl.ProcessUR(ur)
 	case kyvernov2.CELGenerate:
-		ctrl := gpol.NewCELGenerateController(c.client, c.kyvernoClient, c.context, c.gpolEngine, c.gpolProvider, c.watchManager, statusControl, c.eventGen, logger)
+		ctrl := gpol.NewCELGenerateController(c.client, c.kyvernoClient, c.contextFactory, c.gpolEngine, c.gpolProvider, c.watchManager, statusControl, c.eventGen, logger)
 		return ctrl.ProcessUR(ur)
 	case kyvernov2.CELMutate:
 		processor := mpol.NewProcessor(c.client, c.kyvernoClient, c.mpolEngine, c.restMapper, c.context, statusControl, c.eventGen)
